@@ -1055,6 +1055,69 @@ class MyPluginConfig(ConfigBase):
     )
 ```
 
+### 9.6 AgentCtx 正确使用方式 ⚠️
+
+**常见错误**：
+```python
+# ❌ 错误：尝试访问不存在的属性
+user_id = _ctx.from_user_id  # AgentCtx 没有 from_user_id 属性！
+
+# ❌ 错误：在 UserMemory 中添加不存在的 user_id 属性
+class UserMemory(BaseModel):
+    user_id: str  # 这是多余的！UserMemory 存储在 SocialData 中
+```
+
+**正确做法**：
+```python
+# ✅ 正确：根据上下文选择合适的标识
+# 方式1：使用 chat_key（适用于提示注入）
+async def my_prompt_inject(_ctx: AgentCtx) -> str:
+    user_id = _ctx.chat_key  # 频道唯一标识
+    social_data = await get_social_data(user_id)
+    ...
+
+# 方式2：使用 message.sender_id（适用于用户消息回调）
+@plugin.mount_on_user_message()
+async def on_message(_ctx: AgentCtx, message: ChatMessage) -> MsgSignal:
+    user_id = message.sender_id  # 发送者平台 ID
+    if not user_id:
+        return MsgSignal.CONTINUE
+    ...
+
+# ✅ 正确：UserMemory 不需要 user_id（由 SocialData 管理）
+class SocialData(BaseModel):
+    affection: UserAffection  # 包含 user_id
+    memories: Dict[str, UserMemory] = {}  # 按 memory_id 索引
+
+class UserMemory(BaseModel):
+    """用户记忆 - 无需 user_id，由外层 SocialData 关联"""
+    memory_id: str
+    memory_type: str
+    content: str
+    importance: int = 5
+    source_chat_key: str
+    created_at: int
+    expires_at: int
+    tags: List[str] = []
+```
+
+**AgentCtx 核心属性**：
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| `chat_key` | str | 频道唯一标识（adapter_key:channel_id） |
+| `channel_id` | str | 频道原始 ID |
+| `channel_type` | str | 频道类型（group/private） |
+| `adapter_key` | str | 适配器标识 |
+| `db_user` | DBUser | 触发用户数据库实例 |
+| `db_chat_channel` | DBChatChannel | 频道数据库实例 |
+
+**ChatMessage 核心属性**：
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| `sender_id` | str | 发送者平台 ID |
+| `content_text` | str | 纯文本内容 |
+| `message_id` | str | 消息唯一 ID |
+
 ---
 
 ## 10. CI/CD
@@ -1106,7 +1169,7 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Install lint tools
-        run: pip install ruff black mypy
+        run: pip install ruff black
       
       - name: Run ruff
         run: ruff check .
@@ -1114,9 +1177,34 @@ jobs:
       - name: Run black
         run: black --check .
       
-      - name: Run mypy
-        run: mypy plugin.py --ignore-missing-imports
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      
+      - name: Install basedpyright
+        run: pip install basedpyright
+      
+      - name: Install nekro-agent (>=2.2.0)
+        run: pip install "nekro-agent>=2.2.0"
+      
+      - name: Run basedpyright type check
+        run: |
+          basedpyright --version
+          basedpyright plugin.py
 ```
+
+**💡 为什么要做类型检查？**
+- 基于pyright 可以检测 `AgentCtx` 等核心类型的正确使用
+- 避免运行时 `AttributeError: 'AgentCtx' object has no attribute 'from_user_id'`
+- 确保与 nekro-agent 核心库的版本兼容性
+- 在 CI 阶段捕获类型错误，而不是等到用户报错
 
 ### 10.3 自动发布
 
